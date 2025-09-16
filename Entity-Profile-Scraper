@@ -1,0 +1,89 @@
+import sys
+import json
+import re
+from urllib.parse import urlparse
+import requests
+from bs4 import BeautifulSoup
+
+HEADERS = {"User-Agent": "EntityProfileScraper/1.0 (+contact)"}
+
+def fetch(url, timeout=10):
+    resp = requests.get(url, headers=HEADERS, timeout=timeout)
+    resp.raise_for_status()
+    return resp.text
+
+def guess_company_name(soup):
+    # heuristics: title tag, h1, og:title
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+        # remove separators
+        title = re.split(r'[\|\-–·»»:]', title)[0].strip()
+        if len(title) > 2:
+            return title
+    h1 = soup.find('h1')
+    if h1 and h1.get_text(strip=True):
+        return h1.get_text(strip=True)
+    og = soup.find('meta', property='og:title')
+    if og and og.get('content'):
+        return og['content'].strip()
+    return None
+
+def find_text_by_label(soup, labels):
+    text = ''
+    # search for labels like "Registration number", "Registrasyon no", "Address", "Address:"
+    for lbl in labels:
+        # find text nodes matching label
+        found = soup.find_all(string=re.compile(lbl, re.I))
+        for f in found:
+            # look at parent and siblings
+            parent = f.parent
+            # try next sibling
+            sib = parent.find_next_sibling()
+            if sib and sib.get_text(strip=True):
+                return sib.get_text(" ", strip=True)
+            # try parent text with label removed
+            full = parent.get_text(" ", strip=True)
+            candidate = re.sub(re.compile(lbl, re.I), '', full).strip(': ').strip()
+            if candidate:
+                return candidate
+    return None
+
+def summarize_paragraphs(soup, max_par=3):
+    pars = soup.find_all('p')
+    texts = []
+    for p in pars:
+        t = p.get_text(" ", strip=True)
+        if len(t) > 30:
+            texts.append(t)
+        if len(texts) >= max_par:
+            break
+    return " ".join(texts)
+
+def parse_entity_from_html(html, url=None):
+    soup = BeautifulSoup(html, "html.parser")
+    result = {}
+    result['source_url'] = url or ''
+    result['company_name'] = guess_company_name(soup) or ''
+    result['address'] = find_text_by_label(soup, ['address', 'our address', 'adres', 'registered office', 'registered address']) or ''
+    result['registration_number'] = find_text_by_label(soup, ['registration number', 'reg\.? no', 'registrasyon', 'ticaret sicil']) or ''
+    result['summary'] = summarize_paragraphs(soup, max_par=4)
+    # simple contact search
+    contact = find_text_by_label(soup, ['contact', 'iletişim', 'telephone', 'tel:', 'phone'])
+    result['contact'] = contact or ''
+    return result
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python entity_profile_scraper.py <company_page_url>")
+        sys.exit(1)
+    url = sys.argv[1]
+    try:
+        html = fetch(url)
+    except Exception as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+    parsed = parse_entity_from_html(html, url=url)
+    print(json.dumps(parsed, ensure_ascii=False, indent=2))
+
+if __name__ == "__main__":
+    main()
